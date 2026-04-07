@@ -44,15 +44,50 @@ def _is_sector_relevant(title: str, sector: str = "transport") -> bool:
 @st.cache_data(ttl=300)
 def fetch_naver_news(query: str, max_results: int = 10) -> list[dict]:
     """
-    Fetch news from Naver Search (scrape-friendly public endpoint).
+    Fetch news from Naver News Search API.
+    Requires NAVER_CLIENT_ID and NAVER_CLIENT_SECRET environment variables.
     Returns list of {title, url, published, source} dicts.
-    Note: Naver doesn't expose a free API; this uses their web search endpoint.
     """
+    client_id = os.environ.get("NAVER_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        return []
+
     articles = []
     try:
-        # Naver search doesn't have free API; use newsdata.io or NewsAPI instead
-        # This is a placeholder; actual Naver fetching requires web scraping
-        pass
+        url = "https://openapi.naver.com/v1/search/news.json"
+        headers = {
+            "X-Naver-Client-Id": client_id,
+            "X-Naver-Client-Secret": client_secret,
+        }
+        params = {
+            "query": query,
+            "sort": "date",  # Latest first
+            "display": max_results,
+        }
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data.get("items", []):
+                # Naver returns HTML-encoded title and description
+                title = item.get("title", "").replace("<b>", "").replace("</b>", "")
+                url_item = item.get("originalLink", "")
+                source = item.get("source", "Naver News")
+                pub_str = item.get("pubDate", "")
+                published = None
+                if pub_str:
+                    try:
+                        # Naver format: "Mon, 07 Apr 2026 10:30:00 +0900"
+                        from email.utils import parsedate_to_datetime
+                        published = parsedate_to_datetime(pub_str).replace(tzinfo=None)
+                    except Exception:
+                        pass
+                articles.append({
+                    "title": title,
+                    "url": url_item,
+                    "source": source,
+                    "published": published,
+                })
     except Exception:
         pass
     return articles
@@ -184,6 +219,10 @@ def fetch_all_sources_for_sector(
     keywords = ALL_KEYWORDS.get(sector, {})
     query_terms = (keywords.get("en", []) + keywords.get("ko", []))[:5]  # Top 5 keywords
     query = " OR ".join(query_terms[:3])  # Use first 3 for API query
+
+    # ── Naver News ─────────────────────────────────────────────────────
+    articles = fetch_naver_news(query, max_per_source)
+    all_articles.extend(articles)
 
     # ── NewsAPI ─────────────────────────────────────────────────────────
     articles = fetch_newsapi_news(query, max_per_source)

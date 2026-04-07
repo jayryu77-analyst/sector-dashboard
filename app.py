@@ -343,7 +343,7 @@ else:
 
     # Korean stock news — multi-source, last 24h
     st.subheader("Korean Stock News (last 24h)")
-    st.caption("Multi-source: yfinance + NewsAPI + NewsData.io. Transport & Holdings sectors with extended keywords.")
+    st.caption("Multi-source: Naver News + yfinance + NewsAPI + NewsData.io. Transport & Holdings sectors with extended Korean keywords.")
 
     all_selected: list[dict] = []
 
