@@ -9,9 +9,20 @@ import streamlit as st
 from datetime import datetime, timedelta
 
 HIGH_IMPACT_KEYWORDS = [
+    # English
     "earnings", "dividend", "buyback", "merger", "acquisition",
     "fed", "rate", "inflation", "recession", "tariff",
     "guidance", "downgrade", "upgrade", "outlook",
+    "contract", "deal", "agreement", "joint venture",
+    # Korean — Transport/Logistics
+    "운송", "항공", "해운", "물류", "글로비스", "대한항공", "대한통운", "택배",
+    "HMM", "팬오션", "한진", "현대글로비스",
+    # Korean — Holdings/Conglomerate
+    "지주회사", "지배구조", "밸류업", "복합기업", "홀딩스",
+    "삼성물산", "한화", "포스코인터내셔널", "LX인터내셔널", "상사",
+    # Korean — Energy/Utilities
+    "에너지", "전력", "가스", "재생에너지", "발전", "전망",
+    # Common Korean
     "실적", "배당", "합병", "인수", "금리", "수주", "공시", "계약",
 ]
 

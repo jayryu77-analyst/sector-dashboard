@@ -38,6 +38,7 @@ from data.fetcher import (
     fetch_market_caps,
 )
 from data.news import fetch_sector_news, fetch_all_sector_news, format_articles_for_telegram
+from data.news_multi import fetch_all_sources_for_sector
 from components.charts import sector_heatmap, performance_bar, price_history, candlestick
 
 st.set_page_config(page_title="Sector Dashboard", page_icon="📊", layout="wide")
@@ -340,18 +341,24 @@ else:
     )
     st.divider()
 
-    # Korean stock news — sector-wide, last 24h
+    # Korean stock news — multi-source, last 24h
     st.subheader("Korean Stock News (last 24h)")
-    st.caption("Showing news for all Transport + Holdings companies. Check articles to send via Telegram.")
+    st.caption("Multi-source: yfinance + NewsAPI + NewsData.io. Transport & Holdings sectors with extended keywords.")
 
     all_selected: list[dict] = []
-    with st.spinner("Fetching news for all sector companies…"):
-        sector_news = fetch_all_sector_news(KR_STOCKS, max_per_ticker=4)
 
-    for sector_name, s_articles in sector_news.items():
-        with st.expander(f"📂 {sector_name} ({len(s_articles)} articles)", expanded=True):
-            sel = _render_news_selectable(s_articles, name_map=KR_TICKER_NAME, section_key=f"kr_{sector_name}")
-            all_selected.extend(sel)
+    with st.spinner("Fetching news from multiple sources…"):
+        # Combine: yfinance + NewsAPI + NewsData.io
+        transport_articles = fetch_all_sources_for_sector("transport", ticker_names=KR_STOCKS["Transport"])
+        holdings_articles = fetch_all_sources_for_sector("holdings", ticker_names=KR_STOCKS["Holdings"])
+
+    with st.expander(f"📂 Transport ({len(transport_articles)} articles)", expanded=True):
+        sel = _render_news_selectable(transport_articles, name_map=KR_TICKER_NAME, section_key="kr_transport")
+        all_selected.extend(sel)
+
+    with st.expander(f"📂 Holdings ({len(holdings_articles)} articles)", expanded=True):
+        sel = _render_news_selectable(holdings_articles, name_map=KR_TICKER_NAME, section_key="kr_holdings")
+        all_selected.extend(sel)
 
     st.session_state["selected_news"] = all_selected
     if all_selected:
