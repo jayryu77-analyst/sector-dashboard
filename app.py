@@ -65,11 +65,14 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Telegram Alerts")
-    tg_token = st.text_input("Bot Token", value=os.environ.get("TELEGRAM_TOKEN", ""), type="password")
-    tg_chat  = st.text_input("Chat ID",   value=os.environ.get("TELEGRAM_CHAT_ID", ""))
+    _tg_ready = bool(os.environ.get("TELEGRAM_TOKEN")) and bool(os.environ.get("TELEGRAM_CHAT_ID"))
+    if _tg_ready:
+        st.success("Credentials loaded from .env ✓", icon="🔒")
+    else:
+        st.warning("No credentials found. Add them to your `.env` file.", icon="⚠️")
     alert_threshold = st.slider("Alert threshold (%)", 0.5, 10.0, 2.0, 0.5)
-    send_alert_btn  = st.button("📤 Send Alert Now")
-    send_chart_btn  = st.button("📊 Send Chart to Telegram")
+    send_alert_btn  = st.button("📤 Send Alert Now",       disabled=not _tg_ready)
+    send_chart_btn  = st.button("📊 Send Chart to Telegram", disabled=not _tg_ready)
 
     st.divider()
     st.caption("Data via Yahoo Finance. Refreshes every 5 min.")
@@ -97,15 +100,10 @@ if df_perf.empty:
 
 # ── Telegram actions ───────────────────────────────────────────────────────
 if send_alert_btn or send_chart_btn:
-    if not tg_token or not tg_chat:
-        st.sidebar.error("Enter Bot Token and Chat ID first.")
+    from notifier import notify_sector_moves, send_chart, send_text, TELEGRAM_AVAILABLE
+    if not TELEGRAM_AVAILABLE:
+        st.sidebar.error("python-telegram-bot not installed.")
     else:
-        os.environ["TELEGRAM_TOKEN"]   = tg_token
-        os.environ["TELEGRAM_CHAT_ID"] = tg_chat
-        from notifier import notify_sector_moves, send_chart, send_text, TELEGRAM_AVAILABLE
-        if not TELEGRAM_AVAILABLE:
-            st.sidebar.error("python-telegram-bot not installed.")
-        else:
             if send_alert_btn:
                 with st.spinner("Sending alert…"):
                     try:
