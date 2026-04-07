@@ -46,6 +46,7 @@ KR_TICKER_NAME = {t: n for sec in KR_STOCKS.values() for t, n in sec.items()}
 KR_TICKER_SECTOR = {t: sec for sec, stocks in KR_STOCKS.items() for t in stocks}
 
 PERIOD_OPTIONS = {
+    "1 Day": "1d",
     "1 Week": "5d",
     "1 Month": "1mo",
     "3 Months": "3mo",
@@ -59,8 +60,21 @@ PERIOD_OPTIONS = {
 @st.cache_data(ttl=300)
 def fetch_sector_history(period: str = "1mo") -> dict[str, pd.DataFrame]:
     """Return OHLCV DataFrames keyed by ticker for the given period."""
+    # yfinance returns only one row for "1d"; use 2d/1d interval for last-day change.
+    if period == "1d":
+        yf_period = "2d"
+        yf_interval = "1d"
+    else:
+        yf_period = period
+        yf_interval = None
     tickers = list(SECTORS.keys())
-    raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
+    raw = yf.download(
+        tickers,
+        period=yf_period,
+        interval=yf_interval,
+        auto_adjust=True,
+        progress=False,
+    )
     result = {}
     for ticker in tickers:
         try:
@@ -80,7 +94,12 @@ def fetch_sector_performance(period: str = "1mo") -> pd.DataFrame:
     for ticker, df in history.items():
         if df.empty or len(df) < 2:
             continue
-        start_price = df["Close"].iloc[0]
+        if period == "1d":
+            if len(df) < 2:
+                continue
+            start_price = df["Close"].iloc[-2]
+        else:
+            start_price = df["Close"].iloc[0]
         end_price = df["Close"].iloc[-1]
         change_pct = (end_price - start_price) / start_price * 100
         rows.append({
@@ -100,19 +119,64 @@ def fetch_sector_performance(period: str = "1mo") -> pd.DataFrame:
 @st.cache_data(ttl=300)
 def fetch_kr_history(period: str = "1mo") -> dict[str, pd.DataFrame]:
     """Return OHLCV DataFrames for Korean stocks."""
+    # yfinance returns only one row for "1d"; use 2d/1d interval for last-day change.
+    if period == "1d":
+        yf_period = "2d"
+        yf_interval = "1d"
+    else:
+        yf_period = period
+        yf_interval = None
     tickers = list(KR_TICKER_NAME.keys())
-    raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
+    raw = yf.download(
+        tickers,
+        period=yf_period,
+        interval=yf_interval,
+        auto_adjust=True,
+        progress=False,
+    )
     result = {}
+    def _extract_ohlcv(df: pd.DataFrame) -> pd.DataFrame | None:
+        cols = ["Open", "High", "Low", "Close", "Volume"]
+        if all(c in df.columns for c in cols):
+            return df[cols].dropna()
+        return None
     for ticker in tickers:
         try:
             if isinstance(raw.columns, pd.MultiIndex):
-                df = raw.xs(ticker, axis=1, level=1)[["Open", "High", "Low", "Close", "Volume"]]
+                df = None
+                # yfinance can return either level-1 or level-0 as ticker depending on group_by/version
+                if ticker in raw.columns.get_level_values(1):
+                    df = raw.xs(ticker, axis=1, level=1)
+                elif ticker in raw.columns.get_level_values(0):
+                    df = raw.xs(ticker, axis=1, level=0)
+                if isinstance(df, pd.DataFrame):
+                    df = _extract_ohlcv(df)
+                if df is not None and not df.empty:
+                    result[ticker] = df
             else:
-                df = raw[["Open", "High", "Low", "Close", "Volume"]]
-            df = df.dropna()
-            result[ticker] = df
+                # Single-ticker download returns a flat DataFrame
+                if len(tickers) == 1:
+                    df = _extract_ohlcv(raw)
+                    if df is not None and not df.empty:
+                        result[ticker] = df
         except (KeyError, TypeError):
             pass
+    # Fallback: per-ticker download if multi-ticker request failed
+    if not result:
+        for ticker in tickers:
+            try:
+                single = yf.download(
+                    ticker,
+                    period=yf_period,
+                    interval=yf_interval,
+                    auto_adjust=True,
+                    progress=False,
+                )
+                df = _extract_ohlcv(single)
+                if df is not None and not df.empty:
+                    result[ticker] = df
+            except Exception:
+                pass
     return result
 
 
@@ -127,13 +191,19 @@ def fetch_kr_performance(period: str = "1mo") -> pd.DataFrame:
     for ticker, df in history.items():
         if df.empty or len(df) < 2:
             continue
-        start_price = float(df["Close"].iloc[0])
+        if period == "1d":
+            if len(df) < 2:
+                continue
+            start_price = float(df["Close"].iloc[-2])
+        else:
+            start_price = float(df["Close"].iloc[0])
         end_price = float(df["Close"].iloc[-1])
         change_pct = (end_price - start_price) / start_price * 100
         rows.append({
             "ticker": ticker,
             "name": KR_TICKER_NAME.get(ticker, ticker),
             "sector": KR_TICKER_SECTOR.get(ticker, ""),
+            "start_price": round(start_price, 0),
             "current_price": round(end_price, 0),
             "change_pct": round(change_pct, 2),
         })
@@ -148,20 +218,81 @@ def fetch_kr_performance(period: str = "1mo") -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def fetch_kr_valuation() -> pd.DataFrame:
     """
-    Return DataFrame: ticker, per, pbr
-    Cached for 1 hour since .info calls are slow.
+    Return DataFrame: ticker, per, pbr, source.
+    Primary source: pykrx (KRX official data).
+    Fallback: yfinance .info.
+    Cached for 1 hour.
     """
+    # ── 1. Try pykrx (most accurate for Korean stocks) ───────────────────
+    pykrx_data: dict[str, dict] = {}
+    try:
+        from pykrx import stock as krx_stock
+        from datetime import datetime, timedelta
+        # KRX may not have today's data yet; try up to 5 business days back
+        for days_back in range(0, 7):
+            date_str = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+            try:
+                df_fund = krx_stock.get_market_fundamental_by_ticker(date_str, "KOSPI")
+                if df_fund is not None and not df_fund.empty:
+                    for code_6, row in df_fund.iterrows():
+                        pykrx_data[str(code_6)] = {
+                            "per": float(row["PER"]) if row["PER"] > 0 else None,
+                            "pbr": float(row["PBR"]) if row["PBR"] > 0 else None,
+                        }
+                    break  # got data — stop
+            except Exception:
+                continue
+    except ImportError:
+        pass
+
+    # ── 2. Build result, fall back to yfinance per ticker ────────────────
     rows = []
     for ticker in KR_TICKER_NAME:
-        try:
-            info = yf.Ticker(ticker).info
-            per = info.get("trailingPE") or info.get("forwardPE")
-            pbr = info.get("priceToBook")
-            rows.append({
-                "ticker": ticker,
-                "per": round(per, 1) if per and per > 0 else None,
-                "pbr": round(pbr, 2) if pbr and pbr > 0 else None,
-            })
-        except Exception:
-            rows.append({"ticker": ticker, "per": None, "pbr": None})
+        code_6 = ticker.replace(".KS", "").replace(".KQ", "")
+        per, pbr, source = None, None, "N/A"
+
+        if code_6 in pykrx_data:
+            per = pykrx_data[code_6]["per"]
+            pbr = pykrx_data[code_6]["pbr"]
+            source = "KRX"
+        else:
+            # Fallback: yfinance
+            try:
+                info = yf.Ticker(ticker).info
+                per_yf = info.get("trailingPE") or info.get("forwardPE")
+                pbr_yf = info.get("priceToBook")
+                if not pbr_yf:
+                    book = info.get("bookValue")
+                    price = info.get("currentPrice") or info.get("regularMarketPrice")
+                    if book and price:
+                        pbr_yf = price / book
+                per = round(float(per_yf), 1) if per_yf and per_yf > 0 else None
+                pbr = round(float(pbr_yf), 2) if pbr_yf and pbr_yf > 0 else None
+                if per or pbr:
+                    source = "yfinance"
+            except Exception:
+                pass
+
+        rows.append({
+            "ticker": ticker,
+            "per": round(per, 1) if per else None,
+            "pbr": round(pbr, 2) if pbr else None,
+            "val_source": source,
+        })
+
     return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=21600)
+def fetch_market_caps(tickers: list[str]) -> dict[str, float]:
+    """Return market cap per ticker (best-effort)."""
+    caps: dict[str, float] = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t).info
+            cap = info.get("marketCap")
+            if cap:
+                caps[t] = float(cap)
+        except Exception:
+            pass
+    return caps

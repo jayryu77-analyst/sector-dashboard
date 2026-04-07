@@ -1,18 +1,18 @@
 """
 Fetch recent news headlines via yfinance.
 Handles both old (pre-1.0) and new (1.x) yfinance news item structures.
+All public functions return only articles published within the last 24 hours.
 """
 
 import yfinance as yf
 import streamlit as st
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 
 HIGH_IMPACT_KEYWORDS = [
     "earnings", "dividend", "buyback", "merger", "acquisition",
     "fed", "rate", "inflation", "recession", "tariff",
     "guidance", "downgrade", "upgrade", "outlook",
-    # Korean keywords
-    "실적", "배당", "합병", "인수", "금리", "수주", "공시",
+    "실적", "배당", "합병", "인수", "금리", "수주", "공시", "계약",
 ]
 
 
@@ -20,11 +20,9 @@ def _parse_item(item: dict, ticker: str) -> dict | None:
     """Parse a yfinance news item regardless of API version."""
     title, url, source, published = "", "", "", None
 
-    # yfinance 1.x format: item has 'content' sub-dict
-    if "content" in item:
+    if "content" in item:                        # yfinance 1.x
         c = item["content"]
         title = c.get("title", "")
-        # URL is nested
         for url_key in ("canonicalUrl", "clickThroughUrl"):
             if c.get(url_key, {}).get("url"):
                 url = c[url_key]["url"]
@@ -36,8 +34,7 @@ def _parse_item(item: dict, ticker: str) -> dict | None:
                 published = datetime.fromisoformat(pub_str.replace("Z", "+00:00")).replace(tzinfo=None)
             except Exception:
                 pass
-    else:
-        # Legacy format
+    else:                                        # legacy format
         title = item.get("title", "")
         url = item.get("link", "") or item.get("url", "")
         source = item.get("publisher", "") or item.get("source", "")
@@ -62,13 +59,22 @@ def _parse_item(item: dict, ticker: str) -> dict | None:
     }
 
 
+def _is_recent(article: dict, hours: int = 24) -> bool:
+    pub = article.get("published")
+    if not pub:
+        return False
+    return pub >= datetime.now() - timedelta(hours=hours)
+
+
 @st.cache_data(ttl=600)
-def fetch_sector_news(tickers: list[str], max_per_ticker: int = 3) -> list[dict]:
+def fetch_sector_news(tickers: list[str], max_per_ticker: int = 5) -> list[dict]:
     """
-    Fetch recent news for the given tickers.
-    Returns list of article dicts sorted by publish time descending.
+    Fetch news for the given tickers published in the last 24 hours.
+    Returns list of article dicts sorted by (high_impact desc, publish time desc).
     """
     articles = []
+    cutoff = datetime.now() - timedelta(hours=24)
+
     for ticker in tickers:
         try:
             raw_news = yf.Ticker(ticker).news or []
@@ -77,28 +83,42 @@ def fetch_sector_news(tickers: list[str], max_per_ticker: int = 3) -> list[dict]
                 if count >= max_per_ticker:
                     break
                 parsed = _parse_item(item, ticker)
-                if parsed:
+                if parsed and parsed["published"] and parsed["published"] >= cutoff:
                     articles.append(parsed)
                     count += 1
         except Exception:
             pass
 
-    articles.sort(key=lambda x: x["published"] or datetime.min, reverse=True)
+    articles.sort(key=lambda x: (x["high_impact"], x["published"] or datetime.min), reverse=True)
     return articles
 
 
-def format_news_for_telegram(articles: list[dict], limit: int = 5) -> str:
-    """Format top news articles as a Telegram Markdown message."""
+def fetch_all_sector_news(kr_stocks: dict[str, dict[str, str]], max_per_ticker: int = 3) -> dict[str, list[dict]]:
+    """
+    Fetch last-24h news for all stocks grouped by sector.
+    kr_stocks: {sector_name: {ticker: name, ...}}
+    Returns: {sector_name: [article, ...]}
+    """
+    result = {}
+    for sector, stocks in kr_stocks.items():
+        tickers = list(stocks.keys())
+        result[sector] = fetch_sector_news(tickers, max_per_ticker=max_per_ticker)
+    return result
+
+
+def format_articles_for_telegram(articles: list[dict], name_map: dict | None = None) -> str:
+    """Format selected articles as a Telegram Markdown message."""
     if not articles:
         return ""
-    lines = ["📰 *News Highlights*\n"]
-    for a in articles[:limit]:
+    lines = ["📰 *News Digest*\n"]
+    for a in articles:
         flag = "🔔 " if a["high_impact"] else ""
         ts = a["published"].strftime("%m/%d %H:%M") if a["published"] else ""
-        lines.append(f"{flag}*[{a['ticker']}]* {a['title']}")
-        if ts:
-            lines.append(f"  _{a['source']} · {ts}_")
-        if a["url"]:
+        label = (name_map or {}).get(a["ticker"], a["ticker"])
+        lines.append(f"{flag}*[{label}]* {a['title']}")
+        if ts or a.get("source"):
+            lines.append(f"  _{a.get('source', '')} · {ts}_")
+        if a.get("url"):
             lines.append(f"  {a['url']}")
         lines.append("")
     return "\n".join(lines)
